@@ -1,10 +1,10 @@
 from transformers import pipeline, set_seed
 import torch
 
-# Reproducible output ke liye
+# For reproducible output
 set_seed(42)
 
-# GPU available ho to use karega, warna CPU
+# Use GPU if available, otherwise use CPU
 device = 0 if torch.cuda.is_available() else -1
 
 generator = pipeline(
