@@ -4,3 +4,4 @@ def llm_test(model):
     print(response)
 
 llm_test(model)
+ //model (grok)/DeepSeek R1 open source gpt 
