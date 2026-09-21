@@ -1,230 +1,612 @@
-"""
-OpenAI API Test
----------------
-Tests:
-1. Text generation using Responses API
-2. Image generation using Images API
+from __future__ import annotations
 
-Setup:
-    pip install -U openai python-dotenv
-
-Create a .env file:
-    OPENAI_API_KEY=your_api_key_here
-
-Run:
-    python main.py
-"""
-
-import os
+import argparse
 import base64
+import json
+import logging
+import os
+import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable, TypeVar
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 
 # ============================================================
-# Configuration
+# Environment
 # ============================================================
 
 load_dotenv()
 
-API_KEY = os.getenv("OPENAI_API_KEY")
-
-TEXT_MODEL = "gpt-5.6"
-IMAGE_MODEL = "gpt-image-1"
-
-OUTPUT_DIR = Path("outputs")
-IMAGE_FILE = OUTPUT_DIR / "generated_image.png"
-
 
 # ============================================================
-# Client Setup
+# Configuration
 # ============================================================
 
-def create_client() -> OpenAI:
-    """Create and validate the OpenAI client."""
+@dataclass(frozen=True)
+class Config:
+    api_key: str
+    text_model: str = "gpt-5.6"
+    image_model: str = "gpt-image-2"
+    output_dir: Path = Path("outputs")
+    timeout: float = 120.0
+    max_retries: int = 3
 
-    if not API_KEY:
+
+def load_config() -> Config:
+    api_key = os.getenv("OPENAI_API_KEY")
+
+    if not api_key:
         raise RuntimeError(
             "OPENAI_API_KEY is missing.\n"
-            "Add it to your .env file:\n\n"
-            "OPENAI_API_KEY=your_api_key_here"
+            "Create a .env file containing:\n\n"
+            "OPENAI_API_KEY=your_api_key"
         )
 
-    return OpenAI(api_key=API_KEY)
+    return Config(
+        api_key=api_key,
+        text_model=os.getenv("OPENAI_TEXT_MODEL", "gpt-5.6"),
+        image_model=os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2"),
+        output_dir=Path(
+            os.getenv("OPENAI_OUTPUT_DIR", "outputs")
+        ),
+        timeout=float(
+            os.getenv("OPENAI_TIMEOUT", "120")
+        ),
+        max_retries=int(
+            os.getenv("OPENAI_MAX_RETRIES", "3")
+        ),
+    )
+
+
+# ============================================================
+# Logging
+# ============================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+
+logger = logging.getLogger("openai-demo")
+
+
+# ============================================================
+# Client
+# ============================================================
+
+def create_client(config: Config) -> OpenAI:
+    return OpenAI(
+        api_key=config.api_key,
+        timeout=config.timeout,
+        max_retries=config.max_retries,
+    )
+
+
+# ============================================================
+# Utility
+# ============================================================
+
+T = TypeVar("T")
+
+
+def measure(
+    operation: Callable[[], T],
+) -> tuple[T, float]:
+
+    start = time.perf_counter()
+
+    result = operation()
+
+    elapsed = time.perf_counter() - start
+
+    return result, elapsed
+
+
+def save_json(
+    path: Path,
+    data: dict[str, Any],
+) -> None:
+
+    path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    path.write_text(
+        json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+            default=str,
+        ),
+        encoding="utf-8",
+    )
 
 
 # ============================================================
 # Text Generation
 # ============================================================
 
-def generate_text(client: OpenAI) -> str:
-    """Generate a simple explanation of RAG."""
+def generate_rag_explanation(
+    client: OpenAI,
+    config: Config,
+    custom_prompt: str | None = None,
+) -> dict[str, Any]:
 
-    prompt = """
+    prompt = custom_prompt or """
 Explain Retrieval-Augmented Generation (RAG).
 
-Requirements:
-- Use simple English.
-- Explain what RAG is.
-- Explain how it works in 3-4 simple steps.
-- Give one practical real-world example.
-- Keep the explanation concise.
-- Avoid unnecessary technical jargon.
+Return a structured explanation with:
+
+1. definition
+2. why_it_is_used
+3. workflow
+4. practical_example
+5. advantages
+6. limitations
+
+Keep the explanation beginner-friendly.
+
+Use valid JSON with exactly these keys:
+
+{
+  "definition": "...",
+  "why_it_is_used": "...",
+  "workflow": [
+    "...",
+    "...",
+    "..."
+  ],
+  "practical_example": "...",
+  "advantages": [
+    "..."
+  ],
+  "limitations": [
+    "..."
+  ]
+}
 """
 
-    response = client.responses.create(
-        model=TEXT_MODEL,
-        input=prompt,
+    logger.info(
+        "Generating text with %s",
+        config.text_model,
     )
 
-    if not response.output_text:
-        raise RuntimeError("The API returned an empty text response.")
+    def request():
 
-    return response.output_text.strip()
+        return client.responses.create(
+            model=config.text_model,
+            input=prompt,
+        )
+
+    response, elapsed = measure(request)
+
+    text = response.output_text.strip()
+
+    result: dict[str, Any] = {
+        "model": config.text_model,
+        "elapsed_seconds": round(elapsed, 3),
+        "response": text,
+    }
+
+    # --------------------------------------------------------
+    # Usage
+    # --------------------------------------------------------
+
+    if getattr(response, "usage", None):
+
+        usage = response.usage
+
+        result["usage"] = {
+            "input_tokens": getattr(
+                usage,
+                "input_tokens",
+                None,
+            ),
+            "output_tokens": getattr(
+                usage,
+                "output_tokens",
+                None,
+            ),
+            "total_tokens": getattr(
+                usage,
+                "total_tokens",
+                None,
+            ),
+        }
+
+    return result
 
 
 # ============================================================
 # Image Generation
 # ============================================================
 
-def generate_image(client: OpenAI) -> Path:
-    """Generate an AI laboratory image and save it locally."""
+def generate_image(
+    client: OpenAI,
+    config: Config,
+    custom_prompt: str | None = None,
+) -> dict[str, Any]:
 
-    prompt = """
-Create a realistic futuristic AI laboratory.
+    prompt = custom_prompt or """
+Create a photorealistic futuristic AI laboratory.
 
-Scene:
-- A professional software developer working at a computer.
-- Multiple holographic neural-network visualizations in the background.
-- Advanced AI research environment.
-- Modern computers and subtle futuristic technology.
-- Realistic human proportions.
-- Cinematic professional lighting.
-- Highly detailed.
-- Premium technology aesthetic.
-- Photorealistic style.
-- Clean composition.
-- No text.
-- No logos.
-- No watermark.
-- No UI overlays.
+Main subject:
+A professional software engineer working at a high-end
+computer workstation.
+
+Environment:
+- futuristic AI research laboratory
+- holographic neural networks
+- floating data visualizations
+- advanced computing equipment
+- subtle blue ambient lighting
+- realistic materials
+- cinematic depth of field
+
+Style:
+- photorealistic
+- cinematic
+- premium technology aesthetic
+- highly detailed
+- professional
+- realistic human proportions
+
+Composition:
+- 16:9 cinematic feeling inside a square frame
+- developer as the visual focus
+- neural network visualization in the background
+- balanced composition
+
+Do not include:
+- text
+- logos
+- watermarks
+- UI screenshots
+- distorted hands
+- duplicate people
 """
 
-    response = client.images.generate(
-        model=IMAGE_MODEL,
-        prompt=prompt,
-        size="1024x1024",
+    logger.info(
+        "Generating image with %s",
+        config.image_model,
     )
 
-    if not response.data:
-        raise RuntimeError("The API returned no image data.")
+    def request():
 
-    image_base64 = response.data[0].b64_json
+        return client.images.generate(
+            model=config.image_model,
+            prompt=prompt,
+            size="1024x1024",
+        )
+
+    response, elapsed = measure(request)
+
+    if not response.data:
+        raise RuntimeError(
+            "Image API returned no image data."
+        )
+
+    image = response.data[0]
+
+    image_base64 = getattr(
+        image,
+        "b64_json",
+        None,
+    )
 
     if not image_base64:
         raise RuntimeError(
-            "The API response does not contain base64 image data."
+            "Image response did not contain b64_json."
         )
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    config.output_dir.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
 
-    with IMAGE_FILE.open("wb") as file:
-        file.write(base64.b64decode(image_base64))
+    image_path = (
+        config.output_dir /
+        "ai_laboratory.png"
+    )
 
-    return IMAGE_FILE
+    image_bytes = base64.b64decode(
+        image_base64
+    )
+
+    image_path.write_bytes(
+        image_bytes
+    )
+
+    return {
+        "model": config.image_model,
+        "elapsed_seconds": round(
+            elapsed,
+            3,
+        ),
+        "file": str(
+            image_path.resolve()
+        ),
+        "size_bytes": len(image_bytes),
+    }
 
 
 # ============================================================
-# Text Test
+# API Health Check
 # ============================================================
 
-def run_text_test(client: OpenAI) -> None:
-    """Run the text generation test."""
+def health_check(
+    client: OpenAI,
+    config: Config,
+) -> bool:
 
-    print("\n" + "=" * 60)
-    print("TEXT GENERATION")
-    print("=" * 60)
-
-    start_time = time.perf_counter()
+    logger.info("Running API health check...")
 
     try:
-        result = generate_text(client)
 
-        elapsed = time.perf_counter() - start_time
+        response = client.responses.create(
+            model=config.text_model,
+            input="Reply with exactly: OK",
+        )
 
-        print("\nResponse:\n")
-        print(result)
+        result = response.output_text.strip()
 
-        print(f"\nTime: {elapsed:.2f}s")
-        print("Status: SUCCESS")
+        if result.upper() == "OK":
+            logger.info(
+                "API health check: OK"
+            )
+            return True
+
+        logger.warning(
+            "API responded, but unexpected output: %s",
+            result,
+        )
+
+        return True
 
     except Exception as error:
-        print("\nStatus: FAILED")
-        print(f"Error: {error}")
+
+        logger.error(
+            "API health check failed: %s",
+            error,
+        )
+
+        return False
 
 
 # ============================================================
-# Image Test
+# CLI
 # ============================================================
 
-def run_image_test(client: OpenAI) -> None:
-    """Run the image generation test."""
+def parse_args():
 
-    print("\n" + "=" * 60)
-    print("IMAGE GENERATION")
-    print("=" * 60)
+    parser = argparse.ArgumentParser(
+        description="Advanced OpenAI API demo"
+    )
 
-    start_time = time.perf_counter()
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Run text generation",
+    )
 
-    try:
-        image_path = generate_image(client)
+    parser.add_argument(
+        "--image",
+        action="store_true",
+        help="Run image generation",
+    )
 
-        elapsed = time.perf_counter() - start_time
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all tests",
+    )
 
-        print("\nImage generated successfully.")
-        print(f"Saved to: {image_path.resolve()}")
-        print(f"Time: {elapsed:.2f}s")
-        print("Status: SUCCESS")
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Run API health check",
+    )
 
-    except Exception as error:
-        print("\nStatus: FAILED")
-        print(f"Error: {error}")
+    parser.add_argument(
+        "--prompt",
+        type=str,
+        help="Custom text/image prompt",
+    )
+
+    return parser.parse_args()
 
 
 # ============================================================
 # Main
 # ============================================================
 
-def main():
-    """Run all API tests."""
-
-    print("\n" + "=" * 60)
-    print("OPENAI API TEST")
-    print("=" * 60)
-
-    print(f"Text model : {TEXT_MODEL}")
-    print(f"Image model: {IMAGE_MODEL}")
+def main() -> int:
 
     try:
-        client = create_client()
+
+        config = load_config()
+
+        client = create_client(
+            config
+        )
 
     except Exception as error:
-        print("\nClient initialization failed.")
-        print(f"Error: {error}")
-        return
 
-    # Run text generation
-    run_text_test(client)
+        logger.error(
+            "Initialization failed: %s",
+            error,
+        )
 
-    # Run image generation
-    run_image_test(client)
+        return 1
 
-    print("\n" + "=" * 60)
-    print("ALL TESTS COMPLETED")
-    print("=" * 60)
+    args = parse_args()
+
+    # --------------------------------------------------------
+    # Default behavior
+    # --------------------------------------------------------
+
+    if not any(
+        [
+            args.text,
+            args.image,
+            args.all,
+            args.health,
+        ]
+    ):
+        args.all = True
+
+    # --------------------------------------------------------
+    # Health Check
+    # --------------------------------------------------------
+
+    if args.health:
+
+        if not health_check(
+            client,
+            config,
+        ):
+            return 1
+
+    # --------------------------------------------------------
+    # Text
+    # --------------------------------------------------------
+
+    if args.text or args.all:
+
+        print(
+            "\n"
+            + "=" * 70
+        )
+
+        print(
+            "TEXT GENERATION"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        try:
+
+            result = generate_rag_explanation(
+                client,
+                config,
+                args.prompt,
+            )
+
+            print(
+                "\n"
+                + result["response"]
+            )
+
+            print(
+                "\n"
+                f"Time: "
+                f"{result['elapsed_seconds']}s"
+            )
+
+            if "usage" in result:
+
+                print(
+                    "Usage:",
+                    result["usage"],
+                )
+
+            save_json(
+                config.output_dir /
+                "text_result.json",
+                result,
+            )
+
+            print(
+                "\nSaved:"
+                " outputs/text_result.json"
+            )
+
+        except Exception as error:
+
+            logger.error(
+                "Text generation failed: %s",
+                error,
+            )
+
+    # --------------------------------------------------------
+    # Image
+    # --------------------------------------------------------
+
+    if args.image or args.all:
+
+        print(
+            "\n"
+            + "=" * 70
+        )
+
+        print(
+            "IMAGE GENERATION"
+        )
+
+        print(
+            "=" * 70
+        )
+
+        try:
+
+            result = generate_image(
+                client,
+                config,
+                args.prompt,
+            )
+
+            print(
+                "\nImage generated successfully."
+            )
+
+            print(
+                f"File: {result['file']}"
+            )
+
+            print(
+                f"Size: "
+                f"{result['size_bytes']:,} bytes"
+            )
+
+            print(
+                f"Time: "
+                f"{result['elapsed_seconds']}s"
+            )
+
+            save_json(
+                config.output_dir /
+                "image_result.json",
+                result,
+            )
+
+        except Exception as error:
+
+            logger.error(
+                "Image generation failed: %s",
+                error,
+            )
+
+    print(
+        "\n"
+        + "=" * 70
+    )
+
+    print(
+        "DONE"
+    )
+
+    print(
+        "=" * 70
+    )
+
+    return 0
 
 
 # ============================================================
@@ -232,4 +614,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
