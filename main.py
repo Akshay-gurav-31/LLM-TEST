@@ -1,15 +1,16 @@
 import os
-import json
+from typing import Literal
+
 from google import genai
+from google.genai import types
+from pydantic import BaseModel, Field
+
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not GEMINI_API_KEY:
-    raise ValueError("Please set GEMINI_API_KEY in your environment.")
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -17,211 +18,260 @@ JUDGE_MODEL = "gemini-3.8-flash"
 
 
 # ============================================================
-# TEST QUESTION
+# INPUT
 # ============================================================
 
-QUESTION = """
-A company has 3 AI models.
+question = """
+Solve this problem:
 
-Model A costs $10 per million input tokens and $50 per million
-output tokens.
+A train travels 240 km in 3 hours.
+It travels the first 120 km at 40 km/h.
 
-Model B costs $5 per million input tokens and $25 per million
-output tokens.
+What speed must it travel for the remaining 120 km
+so that the total journey takes exactly 3 hours?
 
-Model C costs $1 per million input tokens and $5 per million
-output tokens.
+Explain your reasoning and verify the answer.
+"""
 
-A workload uses 2 million input tokens and 200,000 output tokens.
 
-Calculate the total cost for each model and determine which model
-is the cheapest.
+astra = """
+The first 120 km takes:
 
-Then explain the reasoning step by step and verify the calculations.
+120 / 40 = 3 hours.
+
+Since the total journey must take 3 hours, there is
+no time remaining for the second 120 km.
+
+Therefore, it is impossible for the train to complete
+the journey in exactly 3 hours.
+"""
+
+
+fable = """
+The first half takes:
+
+120 / 40 = 3 hours.
+
+The total allowed time is also 3 hours.
+
+Therefore, the remaining 120 km must be completed
+in 0 hours, which is impossible.
+
+So there is no finite speed that satisfies the
+conditions.
 """
 
 
 # ============================================================
-# PUT ASTRA AND FABLE ANSWERS HERE
+# EVALUATION SCHEMA
 # ============================================================
 
-astra_answer = """
-PASTE ASTRA'S ANSWER HERE
-"""
+class ModelScore(BaseModel):
+    correctness: int = Field(ge=0, le=30)
+    reasoning: int = Field(ge=0, le=25)
+    depth: int = Field(ge=0, le=15)
+    verification: int = Field(ge=0, le=10)
+    robustness: int = Field(ge=0, le=10)
+    instruction_following: int = Field(ge=0, le=10)
 
-fable_answer = """
-PASTE FABLE'S ANSWER HERE
-"""
+    strengths: list[str]
+    weaknesses: list[str]
+
+    total: int = Field(ge=0, le=100)
+
+
+class Evaluation(BaseModel):
+    astra: ModelScore
+    fable: ModelScore
+
+    winner: Literal["Astra", "Fable", "Tie"]
+    margin: int = Field(ge=0, le=100)
+
+    confidence: int = Field(ge=0, le=100)
+
+    reason: str
 
 
 # ============================================================
-# GEMINI JUDGE PROMPT
+# JUDGE
 # ============================================================
 
-judge_prompt = f"""
-You are an independent AI reasoning evaluator.
+prompt = f"""
+You are an independent reasoning benchmark judge.
 
-Your task is to compare two AI model responses to the EXACT same
-reasoning problem.
+Compare Astra and Fable on the EXACT same problem.
 
-Do NOT judge based on writing style, verbosity, or which model you
-personally prefer.
+Do not judge based on:
+- writing style
+- response length
+- model reputation
+- personal preference
 
-Evaluate the actual quality of reasoning.
+Judge only the actual quality of the answer.
 
 QUESTION:
-{QUESTION}
+{question}
 
-========================
-ASTRA RESPONSE
-========================
+ASTRA:
+{astra}
 
-{astra_answer}
+FABLE:
+{fable}
 
-========================
-FABLE RESPONSE
-========================
 
-{fable_answer}
+SCORING:
 
-========================
-EVALUATION RUBRIC
-========================
+Correctness: 30 points
+- Is the final answer correct?
+- Are calculations logically correct?
 
-Score each model from 0 to 100.
+Reasoning: 25 points
+- Is the reasoning logically valid?
+- Are intermediate steps correct?
 
-Use these weights:
+Depth: 15 points
+- Does the response handle the problem completely?
+- Does it identify important implications?
 
-1. Correctness of final answer: 30 points
-2. Mathematical/logical reasoning: 25 points
-3. Depth and completeness: 20 points
-4. Detection and handling of assumptions: 10 points
-5. Verification/self-checking: 10 points
-6. Clarity of reasoning: 5 points
+Verification: 10 points
+- Does it check or validate its conclusion?
+
+Robustness: 10 points
+- Does it avoid unsupported assumptions?
+- Does it handle edge cases correctly?
+
+Instruction following: 10 points
+- Did it actually follow the requested format/task?
+
 
 IMPORTANT:
 
-- Do not reward longer answers automatically.
-- Penalize incorrect reasoning even if the final answer happens
-  to be correct.
-- Penalize unsupported claims.
-- Check every calculation yourself.
-- If both answers are equally correct, give them equal scores.
-- Do not invent information that is not present in the responses.
-- The winner must be based only on the rubric.
-
-Return ONLY valid JSON in this exact structure:
-
-{{
-    "astra": {{
-        "correctness": 0,
-        "reasoning": 0,
-        "depth": 0,
-        "assumptions": 0,
-        "verification": 0,
-        "clarity": 0,
-        "total": 0,
-        "strengths": [],
-        "weaknesses": []
-    }},
-    "fable": {{
-        "correctness": 0,
-        "reasoning": 0,
-        "depth": 0,
-        "assumptions": 0,
-        "verification": 0,
-        "clarity": 0,
-        "total": 0,
-        "strengths": [],
-        "weaknesses": []
-    }},
-    "winner": "Astra or Fable or Tie",
-    "margin": 0,
-    "reason": "Short factual explanation of why."
-}}
+1. Calculate the total score yourself.
+2. The total must equal the sum of all six categories.
+3. Do not reward verbosity.
+4. A short answer can receive 100/100 if it is completely correct.
+5. Penalize incorrect reasoning even if the final answer is correct.
+6. If both models are genuinely equivalent, return Tie.
+7. Margin = absolute difference between total scores.
+8. Confidence represents how certain you are about the comparison.
 """
 
 
 # ============================================================
-# RUN GEMINI JUDGE
+# GEMINI CALL
 # ============================================================
 
 response = client.models.generate_content(
     model=JUDGE_MODEL,
-    contents=judge_prompt
+    contents=prompt,
+    config=types.GenerateContentConfig(
+        temperature=0,
+        response_mime_type="application/json",
+        response_schema=Evaluation,
+    ),
 )
 
-result_text = response.text.strip()
+
+# ============================================================
+# PARSE STRUCTURED RESPONSE
+# ============================================================
+
+result = Evaluation.model_validate_json(response.text)
 
 
 # ============================================================
-# PARSE JSON
+# VALIDATE SCORES
 # ============================================================
 
-try:
-    result = json.loads(result_text)
-except json.JSONDecodeError:
-    print("Gemini returned invalid JSON:")
-    print(result_text)
-    raise
+def validate_score(name: str, score: ModelScore):
+    calculated = (
+        score.correctness
+        + score.reasoning
+        + score.depth
+        + score.verification
+        + score.robustness
+        + score.instruction_following
+    )
+
+    if calculated != score.total:
+        raise ValueError(
+            f"{name} score mismatch: "
+            f"categories={calculated}, total={score.total}"
+        )
+
+
+validate_score("Astra", result.astra)
+validate_score("Fable", result.fable)
 
 
 # ============================================================
-# DISPLAY RESULT
+# VALIDATE WINNER
 # ============================================================
+
+actual_margin = abs(
+    result.astra.total - result.fable.total
+)
+
+if result.margin != actual_margin:
+    raise ValueError(
+        f"Invalid margin: Gemini={result.margin}, "
+        f"calculated={actual_margin}"
+    )
+
+
+expected_winner = (
+    "Astra"
+    if result.astra.total > result.fable.total
+    else "Fable"
+    if result.fable.total > result.astra.total
+    else "Tie"
+)
+
+if result.winner != expected_winner:
+    raise ValueError(
+        f"Invalid winner: Gemini={result.winner}, "
+        f"calculated={expected_winner}"
+    )
+
+
+# ============================================================
+# OUTPUT
+# ============================================================
+
+def print_model(name: str, score: ModelScore):
+
+    print(f"\n{name}")
+    print("-" * 40)
+
+    print(f"Correctness          : {score.correctness}/30")
+    print(f"Reasoning            : {score.reasoning}/25")
+    print(f"Depth                : {score.depth}/15")
+    print(f"Verification         : {score.verification}/10")
+    print(f"Robustness           : {score.robustness}/10")
+    print(f"Instruction Following: {score.instruction_following}/10")
+    print(f"TOTAL                : {score.total}/100")
+
+    print("\nStrengths:")
+    for item in score.strengths:
+        print(f"  + {item}")
+
+    print("\nWeaknesses:")
+    for item in score.weaknesses:
+        print(f"  - {item}")
+
 
 print("\n" + "=" * 60)
-print("ASTRA vs FABLE REASONING EVALUATION")
+print("ASTRA vs FABLE")
 print("=" * 60)
 
-print(f"\nAstra Score : {result['astra']['total']}/100")
-print(f"Fable Score : {result['fable']['total']}/100")
-
-print(f"\nWinner      : {result['winner']}")
-print(f"Score Margin: {result['margin']} points")
-
-print("\n" + "-" * 60)
-print("ASTRA")
-print("-" * 60)
-
-print("Correctness :", result["astra"]["correctness"])
-print("Reasoning   :", result["astra"]["reasoning"])
-print("Depth       :", result["astra"]["depth"])
-print("Assumptions :", result["astra"]["assumptions"])
-print("Verification:", result["astra"]["verification"])
-print("Clarity     :", result["astra"]["clarity"])
-
-print("\nStrengths:")
-for item in result["astra"]["strengths"]:
-    print(f"- {item}")
-
-print("\nWeaknesses:")
-for item in result["astra"]["weaknesses"]:
-    print(f"- {item}")
-
-
-print("\n" + "-" * 60)
-print("FABLE")
-print("-" * 60)
-
-print("Correctness :", result["fable"]["correctness"])
-print("Reasoning   :", result["fable"]["reasoning"])
-print("Depth       :", result["fable"]["depth"])
-print("Assumptions :", result["fable"]["assumptions"])
-print("Verification:", result["fable"]["verification"])
-print("Clarity     :", result["fable"]["clarity"])
-
-print("\nStrengths:")
-for item in result["fable"]["strengths"]:
-    print(f"- {item}")
-
-print("\nWeaknesses:")
-for item in result["fable"]["weaknesses"]:
-    print(f"- {item}")
-
+print_model("ASTRA", result.astra)
+print_model("FABLE", result.fable)
 
 print("\n" + "=" * 60)
-print("FINAL VERDICT")
+print("RESULT")
 print("=" * 60)
 
-print(result["reason"])
+print(f"Winner     : {result.winner}")
+print(f"Margin     : {result.margin}/100")
+print(f"Confidence : {result.confidence}%")
+print(f"\nReason:\n{result.reason}")
