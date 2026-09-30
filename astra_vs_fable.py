@@ -1,18 +1,3 @@
-"""
-Astra vs Fable LLM Benchmark
------------------------------
-Give the SAME task to Astra and Fable, score both answers, and declare
-a winner based on the total score.
-
-Set the API keys/endpoints below according to your providers.
-
-Install:
-    pip install openai
-
-Run:
-    python astra_vs_fable.py
-"""
-
 import os
 from openai import OpenAI
 
